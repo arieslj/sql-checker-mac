@@ -1,0 +1,14 @@
+.venv
+__pycache__/
+.pytest_cache/
+.DS_Store
+*.pyc
+*.zip
+mac/build-backend/
+mac/build-work/
+mac/dist*/
+mac/profile/
+mac/.pyinstaller-cache/
+mac/.swift-cache/
+mac/*.spec
+mac/assets/AppIcon.iconset/
