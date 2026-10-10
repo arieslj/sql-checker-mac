@@ -100,3 +100,17 @@ def test_aggregate_alias_needs_schema_confirmation_not_definitive_error():
 
 def test_aggregate_alias_matching_real_input_is_not_a_group_syntax_error():
     assert not errors('select sum(b) as b from t group by b')
+
+
+@pytest.mark.parametrize('sql',[
+    'select a.region,count(*) from t a join u b on a.id=b.id group by region',
+    'select region,count(*) from t a join u b on a.id=b.id group by a.region',
+])
+def test_multi_source_bare_qualified_match_requires_schema_not_certain_error(sql):
+    assert not errors(sql)
+    assert any(i['code']=='GROUP_COLUMN_AMBIGUOUS' and i['priority']==0 for i in grouping(sql))
+
+
+def test_two_explicitly_different_table_fields_still_raise_group_error():
+    sql='select a.region,count(*) from t a join u b on a.id=b.id group by b.region'
+    assert any(i['code']=='GROUP_NON_AGGREGATE' for i in errors(sql))

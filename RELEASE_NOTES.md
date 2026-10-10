@@ -10,4 +10,4 @@
 
 下载 `SQL-Checker-macOS-AppleSilicon-v1.0.6.zip`，退出旧应用后替换。Apple Silicon / macOS 14+，保留 M 系列兼容性修复。应用尚未进行 Apple Developer ID 签名/公证，未在所有 M 系列和系统版本实机验证。
 
-84 项 Python 测试、原生通信、打包引擎与兼容性审计通过；测试只使用合成 SQL。DLI 配置、字段类型、歧义别名、复杂分组仍需数据库验证。
+87 项 Python 测试、原生通信、打包引擎与兼容性审计通过；测试只使用合成 SQL。DLI 配置、字段类型、歧义别名、复杂分组仍需数据库验证。

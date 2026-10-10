@@ -135,11 +135,11 @@ def group_consistency_issues(select, template_reverse=None):
     names = [source.this.alias_or_name.lower()] if source and source.this.alias_or_name else []
     names += [j.this.alias_or_name.lower() for j in select.args.get('joins', []) if j.this.alias_or_name]
     sole_source = names[0] if len(names) == 1 else None
-    def key(node):
+    def key(node, unqualified=False):
         def normalize(item):
             if isinstance(item, exp.Paren): return item.this
             if isinstance(item, exp.Identifier): item.set('this', item.this.lower())
-            if isinstance(item, exp.Column) and sole_source and item.table.lower() == sole_source:
+            if isinstance(item, exp.Column) and (unqualified or sole_source and item.table.lower() == sole_source):
                 for part in ('table', 'db', 'catalog'): item.set(part, None)
             return item
         return node.copy().transform(normalize).sql(dialect='spark')
@@ -189,6 +189,7 @@ def group_consistency_issues(select, template_reverse=None):
     for item in select.expressions:
         value = item.this if isinstance(item, exp.Alias) else item
         missing = []
+        ambiguous = []
         def validate(node, window_function=False):
             nonlocal unknown_star
             if isinstance(node, (exp.Select, exp.Subquery)): return
@@ -196,6 +197,16 @@ def group_consistency_issues(select, template_reverse=None):
             if canonical in keys:
                 used.add(canonical)
                 return
+            if len(names) > 1:
+                for group_key, (_, expression) in keys.items():
+                    if key(node, unqualified=True) != key(expression, unqualified=True): continue
+                    left = [n for n in local_nodes(node) if isinstance(n, exp.Column)]
+                    right = [n for n in local_nodes(expression) if isinstance(n, exp.Column)]
+                    if len(left) != len(right) or not left: continue
+                    if all(a.table.lower() == b.table.lower() or not a.table or not b.table for a,b in zip(left,right)) and any(bool(a.table) != bool(b.table) for a,b in zip(left,right)):
+                        ambiguous.append(node)
+                        used.add(group_key)
+                        return
             if isinstance(node, exp.Star) or isinstance(node, exp.Column) and isinstance(node.this, exp.Star):
                 unknown_star = True
                 return
@@ -222,6 +233,8 @@ def group_consistency_issues(select, template_reverse=None):
                 return
             for child in node.iter_expressions(): validate(child)
         validate(value)
+        if ambiguous:
+            emit('GROUP_COLUMN_AMBIGUOUS', 'warning', f'输出 {display(value)} 与 group by 存在同名但限定方式不同的字段；多表来源下无法离线确认是否相同。', '结合表结构核对裸字段实际来源，建议在 select 和 group by 明确使用相同表别名。', ambiguous[0])
         if missing:
             fields = ', '.join(dict.fromkeys(display(c) for c in missing))
             if group is None:
