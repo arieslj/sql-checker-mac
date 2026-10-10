@@ -11,8 +11,7 @@
 [下载 Mac 应用 v1.0.5（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.5/SQL-Checker-macOS-AppleSilicon-v1.0.5.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
 
 解压后将「SQL 检查器.app」拖入「应用程序」，双击使用。无需安装 Python、无需终端、不需要联网。升级时先退出旧版再替换。
-
-应用使用临时本地签名，尚未完成 Apple Developer ID 签名/公证；macOS 首次打开时可能要求确认。要求 macOS 14 或更新版本，支持 Apple Silicon 架构（包括 M1 / M2 / M3 / M4）。仅开发机器完成实机验证；Intel 和其他机器未验证。
+macOS 首次打开时可能要求确认。要求 macOS 14 或更新版本，支持 Apple Silicon 架构（包括 M1 / M2 / M3 / M4）。仅开发机器完成实机验证；Intel 和其他机器未验证。
 
 ![应用界面（合成示例）](mac/startup-preview.png)
 
@@ -43,12 +42,6 @@ join 提示不表示已确认行数放大。除零检测只明确识别 `nullif`
 例如连接 `a6` 时，`on a6.area = a1.area and a5.region = a1.region` 会优先提示第二项，建议核对是否应改为 `a6.region = a1.region`。即使 `a5` 已定义，也会识别该模式。[查看优先处理示例](mac/join-priority-preview.png)。高优先级关联问题在清单中置顶，显示「优先处理」，复制清单也保留标记。
 
 历史表别名可以合法参与当前 on；本工具不会一律禁止 `a5`。新规则保守检查直接 AND 等值条件中的同名连接键及共有锚点，不推断 schema，不自动改写 SQL。部分历史别名条件可能是有意的业务过滤，此时应人工确认。未限定字段、OR、复杂子查询和不明确的结构体访问不保证覆盖。这里的高优先级报错表示关联风险，不代表 SQL 语法必然不合法。
-
-## 启动优化
-
-v1.0.3 让界面直接从应用内文件加载，检查引擎后台预热；准备期间可以输入 SQL，不刷新页面或覆盖输入。修复冻结应用后台辅助进程错误启动服务的问题。
-
-本机一次测量：从应用主程序开始，编辑界面约 1.14 秒可用，引擎约 1.44 秒就绪。不包含 macOS 启动前的首次安全检查，也不保证其他电脑的速度。立刻点击检查仍可能短暂等待引擎。[测量方法与边界](mac/startup-performance.md)。
 
 ## 从源码运行网页版
 
