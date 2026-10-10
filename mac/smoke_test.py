@@ -34,7 +34,11 @@ def main():
         joined = post('check', 'select * from t a1 join u a5 on a5.id=a1.id join v a6 on a6.area=a1.area and a5.region=a1.region')['issues']
         assert joined[0]['code'] == 'JOIN_KEY_ALIAS_MISMATCH' and joined[0]['priority'] == 0
         assert 'a6.region = a1.region' in joined[0]['suggestion']
-        print('Frozen backend smoke checks passed: startup, engines, formatting, templates and priority-0 join alias checks.')
+        grouped = post('check', 'select area,region,sum(amount) from synthetic_items group by area')['issues']
+        assert grouped[0]['code'] == 'GROUP_NON_AGGREGATE' and grouped[0]['priority'] == 0 and grouped[0]['severity'] == 'error'
+        missing = post('check', 'select area,sum(amount) from synthetic_items')['issues']
+        assert missing[0]['code'] == 'GROUP_BY_MISSING' and missing[0]['priority'] == 0
+        print('Frozen backend checks passed: engines, formatting, templates, priority-0 joins and aggregate/group consistency.')
     finally:
         p.terminate()
         p.wait(timeout=10)

@@ -1,5 +1,6 @@
 """Offline Spark SQL analysis. No execution, network, or persistence."""
 import re
+import hashlib
 import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
@@ -7,9 +8,27 @@ from sqlfluff.core import FluffConfig, Linter
 
 CONFIG = FluffConfig(configs={"core": {"dialect": "sparksql", "templater": "raw", "rules": "CP01,LT01,LT02,LT04"}, "rules": {"capitalisation.keywords": {"capitalisation_policy": "lower"}}, "layout": {"type": {"comma": {"line_position": "leading"}}}})
 
+def template_tokens(sql):
+    # Equal-width, distinct markers preserve both source locations and identity.
+    mapping = {}
+    reverse = {}
+    def substitute(match):
+        variable = match.group()
+        if variable in mapping: return mapping[variable]
+        width, salt = len(variable), 0
+        while True:
+            digest = hashlib.sha256(f'{variable}:{salt}'.encode()).hexdigest()
+            marker = ('v' + digest * (1 + width // len(digest)))[:width]
+            if marker not in sql and not any(marker in other or other in marker for other in reverse): break
+            salt += 1
+        mapping[variable] = marker
+        reverse[marker] = variable
+        return marker
+    prepared = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", substitute, sql)
+    return prepared, reverse
+
 def prepare(sql):
-    # Same-width replacement preserves original line/column positions.
-    return re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", lambda m: 'v' * len(m.group()), sql)
+    return template_tokens(sql)[0]
 
 def mask(sql):
     pattern = r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|\\.|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`"
@@ -75,6 +94,149 @@ def join_alias_issues(select):
         previous.add(current)
     return result
 
+def group_consistency_issues(select, template_reverse=None):
+    """Compare grouping expressions with local non-aggregate output dependencies."""
+    def display(node):
+        text = node.sql(dialect='spark')
+        for marker, original in sorted((template_reverse or {}).items(), key=lambda pair: -len(pair[0])):
+            text = text.replace(marker, original)
+        return text
+    result = []
+    group = select.args.get('group')
+    def emit(code, severity, reason, suggestion, node, priority=0):
+        result.append((code, severity, reason, suggestion, node, priority))
+    def local_nodes(node):
+        yield node
+        for child in node.iter_expressions():
+            if isinstance(child, (exp.Select, exp.Subquery)): continue
+            yield from local_nodes(child)
+    def global_aggregate(node):
+        for item in local_nodes(node):
+            if not isinstance(item, exp.AggFunc): continue
+            parent = item.parent
+            nested_aggregate = False
+            while parent is not None and parent is not select:
+                if isinstance(parent, exp.AggFunc): nested_aggregate = True
+                if isinstance(parent, exp.Window):
+                    if nested_aggregate: return True
+                    break
+                parent = parent.parent
+            else:
+                return True
+        return False
+    has_aggregate = any(global_aggregate(item) for item in select.expressions)
+    for clause in ('having', 'order'):
+        if select.args.get(clause) and global_aggregate(select.args[clause]): has_aggregate = True
+    if group is None and not has_aggregate: return result
+    if group is not None and (group.find(exp.Rollup, exp.Cube, exp.GroupingSets) or group.args.get('all')):
+        emit('GROUP_COMPLEX_UNVERIFIED', 'warning', '复杂分组（rollup/cube/grouping sets/all）需核对 DLI 方言和输出字段，本次未作简单字段一致性判定。', '检查各分组集合及输出维度，在 DLI 验证执行结果。', group, 2)
+        return result
+    source = select.args.get('from_')
+    names = [source.this.alias_or_name.lower()] if source and source.this.alias_or_name else []
+    names += [j.this.alias_or_name.lower() for j in select.args.get('joins', []) if j.this.alias_or_name]
+    sole_source = names[0] if len(names) == 1 else None
+    def key(node):
+        def normalize(item):
+            if isinstance(item, exp.Paren): return item.this
+            if isinstance(item, exp.Identifier): item.set('this', item.this.lower())
+            if isinstance(item, exp.Column) and sole_source and item.table.lower() == sole_source:
+                for part in ('table', 'db', 'catalog'): item.set(part, None)
+            return item
+        return node.copy().transform(normalize).sql(dialect='spark')
+    aliases = {}
+    for item in select.expressions:
+        if isinstance(item, exp.Alias): aliases.setdefault(item.alias.lower(), []).append(item.this)
+    keys = {}
+    uncertain = False
+    for item in group.expressions if group is not None else []:
+        value = item
+        resolved_alias = False
+        if isinstance(item, exp.Column) and not item.table and item.name.lower() in aliases:
+            choices = aliases[item.name.lower()]
+            if len(choices) != 1:
+                emit('GROUP_ALIAS_AMBIGUOUS', 'warning', f'group by 别名 {item.name} 对应多个输出表达式，无法可靠核对。', '为输出表达式使用唯一别名，再核对分组含义。', item)
+                uncertain = True
+                continue
+            candidate = choices[0]
+            # An aggregate alias equal to one of its input names may also be a
+            # real input column; avoid declaring a legal physical key invalid.
+            input_collision = any(isinstance(n, exp.Column) and n.name.lower() == item.name.lower() for n in local_nodes(candidate))
+            if isinstance(candidate, exp.AggFunc) and input_collision:
+                value = item
+            else:
+                value = candidate
+                resolved_alias = True
+        elif isinstance(item, exp.Literal) and item.is_int:
+            position = int(item.this)
+            if position < 1 or position > len(select.expressions):
+                emit('GROUP_POSITION_INVALID', 'error', f'group by 序号 {position} 超出 select 输出列表范围。', '核对输出位置及 spark.sql.groupByOrdinal 配置，建议使用明确的分组表达式。', item)
+                uncertain = True
+                continue
+            target = select.expressions[position - 1]
+            value = target.this if isinstance(target, exp.Alias) else target
+        if any(isinstance(n, exp.Star) for n in local_nodes(value)):
+            emit('GROUP_WILDCARD_UNVERIFIED', 'warning', '分组/输出包含星号，离线无法确定实际列与序号。', '展开明确字段后核对，或结合数据库表结构验证。', item)
+            uncertain = True
+            continue
+        if any(isinstance(n, (exp.AggFunc, exp.Window)) for n in local_nodes(value)):
+            emit('GROUP_AGGREGATE_KEY', 'warning' if resolved_alias else 'error', f'group by 项 {display(item)} 按输出别名解析为聚合或窗口表达式。' if resolved_alias else f'group by 项 {display(item)} 包含聚合或窗口表达式。', '分组应使用输入维度，核对输出别名、序号与表结构；聚合表达式留在输出或 having 中。', item)
+            uncertain = True
+            continue
+        keys[key(value)] = (item, value)
+    if uncertain: return result
+    used = set()
+    unknown_star = False
+    for item in select.expressions:
+        value = item.this if isinstance(item, exp.Alias) else item
+        missing = []
+        def validate(node, window_function=False):
+            nonlocal unknown_star
+            if isinstance(node, (exp.Select, exp.Subquery)): return
+            canonical = key(node)
+            if canonical in keys:
+                used.add(canonical)
+                return
+            if isinstance(node, exp.Star) or isinstance(node, exp.Column) and isinstance(node.this, exp.Star):
+                unknown_star = True
+                return
+            if isinstance(node, exp.Window):
+                validate(node.this, window_function=True)
+                for name, argument in node.args.items():
+                    if name == 'this': continue
+                    if isinstance(argument, exp.Expression): validate(argument)
+                    elif isinstance(argument, list):
+                        for child in argument:
+                            if isinstance(child, exp.Expression): validate(child)
+                return
+            if isinstance(node, (exp.Filter, exp.WithinGroup)):
+                function = node.this
+                while isinstance(function, (exp.Filter, exp.WithinGroup)): function = function.this
+                if isinstance(function, exp.AggFunc) and not window_function: return
+                validate(node.this, window_function)
+                for child in node.iter_expressions():
+                    if child is not node.this: validate(child)
+                return
+            if isinstance(node, exp.AggFunc) and not window_function: return
+            if isinstance(node, exp.Column):
+                missing.append(node)
+                return
+            for child in node.iter_expressions(): validate(child)
+        validate(value)
+        if missing:
+            fields = ', '.join(dict.fromkeys(display(c) for c in missing))
+            if group is None:
+                emit('GROUP_BY_MISSING', 'error', f'当前查询混用聚合与非聚合输出 {fields}，但没有 group by。', '按业务统计维度添加 group by，或将对应输出改为符合业务含义的聚合表达式。', missing[0])
+            else:
+                emit('GROUP_NON_AGGREGATE', 'error', f'select 输出 {display(value)} 包含未被 group by 覆盖的非聚合字段：{fields}。', '核对 select 与 group by 的字段和完整表达式；将其纳入正确分组维度或按业务含义聚合，确认统计粒度。', missing[0])
+    if unknown_star:
+        emit('GROUP_WILDCARD_UNVERIFIED', 'warning', '聚合查询使用 *，无法离线确认输出列与 group by 是否一致。', '展开明确字段，结合表结构核对非聚合列。', select.expressions[0])
+    if has_aggregate and group is not None and not unknown_star:
+        for canonical, (item, value) in keys.items():
+            if canonical not in used and any(isinstance(n, exp.Column) for n in local_nodes(value)):
+                emit('GROUP_KEY_NOT_PROJECTED', 'warning', f'group by 维度 {display(item)} 未在非聚合输出中体现，结果可能存在隐藏分组粒度。', '这在 SQL 中可以合法；确认该维度是否为有意分组，是否需要在 select 展示，勿自动删除分组项。', item)
+    return result
+
+
 def analyze(sql):
     issues = []
     def add(code, level, category, reason, suggestion, node=None, offset=None, priority=None):
@@ -106,7 +268,7 @@ def analyze(sql):
                 add('GROUP_TRAILING_COMMA', 'error', '确定性语法错误', 'group by 字段列表末尾有多余逗号。', '删除末尾逗号。', offset=previous.start)
     except sqlglot.errors.TokenError:
         pass
-    prepared = prepare(sql)
+    prepared, template_reverse = template_tokens(sql)
     try:
         trees = sqlglot.parse(prepared, read='spark')
     except (sqlglot.errors.ParseError, sqlglot.errors.TokenError) as exc:
@@ -135,17 +297,10 @@ def analyze(sql):
                         if isinstance(eq.this, exp.Column) and isinstance(eq.expression, exp.Column) and eq.this == eq.expression:
                             add('SELF_JOIN_CONDITION', 'warning', '静态风险', 'join 条件两侧引用同一个字段，无法关联左右两表。', '确认是否应使用另一表别名；不要自动替换业务条件。', eq)
                 add('JOIN_MULTIPLICATION', 'warning', '需要数据库验证', 'join 可能因连接键重复或缺少关联条件放大行数。', '检查双方连接键唯一性、空值和匹配基数，比较 join 前后行数。', join)
-            group = select.args.get('group')
-            if group and not any(isinstance(g, exp.Literal) or g.find(exp.Rollup, exp.Cube) for g in group.expressions):
-                grouped = {g.sql(dialect='spark') for g in group.expressions}
-                for item in select.expressions:
-                    value = item.this if isinstance(item, exp.Alias) else item
-                    if value.find(exp.Window) or not value.find(exp.Column): continue
-                    if value.sql(dialect='spark') in grouped or item.alias in grouped: continue
-                    cols = [c for c in value.find_all(exp.Column) if not c.find_ancestor(exp.AggFunc)]
-                    if not cols: continue
-                    if all(c.sql(dialect='spark') in grouped for c in cols): continue
-                    add('GROUP_NON_AGGREGATE', 'warning', '静态风险', '输出表达式可能包含未分组的非聚合字段。', '确认字段属于 group by，或按业务含义使用聚合；复杂表达式需在 DLI 验证。', value)
+            for code, severity, reason, suggestion, node, priority in group_consistency_issues(select, template_reverse):
+                category = '高优先级聚合一致性错误' if severity == 'error' else '分组粒度风险' if code == 'GROUP_KEY_NOT_PROJECTED' else '分组验证提示'
+                metadata = next((part.meta for part in node.walk() if part.meta.get('start') is not None), {})
+                add(code, severity, category, reason, suggestion, node, offset=metadata.get('start'), priority=priority)
         for div in tree.find_all(exp.Div):
             denominator = div.expression
             if isinstance(denominator, exp.Nullif): continue
@@ -153,7 +308,7 @@ def analyze(sql):
         for between in tree.find_all(exp.Between):
             add('DATE_BOUNDARY', 'info', '静态风险', 'between 包含两个端点；用于日期或时间区间时需核对边界。', '时间戳按天筛选可采用 >= 起日 and < 次日；核对字段类型。', between)
         for compare in tree.find_all(exp.LTE, exp.LT, exp.GTE, exp.GT):
-            if re.search(r'\d{4}-\d{2}-\d{2}|v{5,}', compare.sql()):
+            if re.search(r'\d{4}-\d{2}-\d{2}', compare.sql()) or any(marker in compare.sql() for marker in template_reverse):
                 add('DATE_BOUNDARY', 'info', '静态风险', '日期或模板区间的端点需要核对。', '核对包含/排除端点、模板值和日期/时间戳类型。', compare)
     try:
         for v in Linter(config=CONFIG).lint_string(prepared).get_violations():
