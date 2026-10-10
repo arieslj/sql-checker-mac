@@ -8,7 +8,7 @@
 
 ## 下载与使用
 
-[下载 Mac 应用 v1.0.3（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.3/SQL-Checker-macOS-AppleSilicon-v1.0.3.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
+[下载 Mac 应用 v1.0.4（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.4/SQL-Checker-macOS-AppleSilicon-v1.0.4.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
 
 解压后将「SQL 检查器.app」拖入「应用程序」，双击使用。无需安装 Python、无需终端、不需要联网。升级时先退出旧版再替换。
 
@@ -24,7 +24,8 @@
 | --- | --- |
 | 确定性语法错误 | SQL 代码中的中文全角标点、group by 末尾多余逗号 |
 | 解析器报错 | SQLGlot 解析失败，带行号和列号；需核对 DLI 专有语法 |
-| 静态结构问题 | 当前或外层作用域未定义的表别名 |
+| 静态结构问题 | 当前或外层作用域未定义的表别名、on 引用后续才加入的表 |
+| 高优先级关联风险 | 当前 join 表没有被 on 引用，或部分同名连接键疑似用了历史表别名 |
 | 静态风险 | 两侧同字段的 join 条件、可能除零、未分组的非聚合输出、日期区间边界 |
 | 数据库验证提示 | join 连接键重复导致的潜在行数放大 |
 | 格式建议 | SQL 关键字小写、前置逗号、四空格缩进与空格 |
@@ -36,6 +37,12 @@
 join 提示不表示已确认行数放大。除零检测只明确识别 `nullif` 防护，`case when` 等防护可能仍收到提示。复杂分组表达式、分组序号、rollup/cube/grouping sets 的覆盖有限。日期提示不能推断真实字段类型；完整 Jinja / 动态 SQL 不支持。
 
 格式化通过词法 token、字面量、引用标识符和注释比较，拒绝结构变化或无法解析的输入。格式化后需要重新检查。单次 SQL 上限为 50,000 字符。
+
+## on 条件的别名核对
+
+例如连接 `a6` 时，`on a6.area = a1.area and a5.region = a1.region` 会优先提示第二项，建议核对是否应改为 `a6.region = a1.region`。即使 `a5` 已定义，也会识别该模式。[查看优先处理示例](mac/join-priority-preview.png)。高优先级关联问题在清单中置顶，显示「优先处理」，复制清单也保留标记。
+
+历史表别名可以合法参与当前 on；本工具不会一律禁止 `a5`。新规则保守检查直接 AND 等值条件中的同名连接键及共有锚点，不推断 schema，不自动改写 SQL。部分历史别名条件可能是有意的业务过滤，此时应人工确认。未限定字段、OR、复杂子查询和不明确的结构体访问不保证覆盖。这里的高优先级报错表示关联风险，不代表 SQL 语法必然不合法。
 
 ## 启动优化
 
@@ -64,7 +71,7 @@ python3 -m venv .venv
 node mac/test_bridge.cjs
 ```
 
-本机 23 项 Python 测试通过，覆盖检测规则、作用域、行号、模板、格式化、API 验证及轻量启动。原生通信成功/错误/超时/网页版回退、冻结进程和实际 Mac 窗口操作已验证。全部使用合成 SQL，没有读取业务数据。
+本机 40 项 Python 测试通过，覆盖检测规则、作用域、行号、模板、格式化、API 验证及轻量启动。原生通信成功/错误/超时/网页版回退、冻结进程和实际 Mac 窗口操作已验证。全部使用合成 SQL，没有读取业务数据。
 
 [Mac 构建与打包说明](mac/README.md)。仓库附有自动测试工作流。CI 的结果以 GitHub Actions 实际运行结果为准。
 

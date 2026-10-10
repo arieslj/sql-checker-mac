@@ -15,9 +15,69 @@ def mask(sql):
     pattern = r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|\\.|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`"
     return re.sub(pattern, lambda m: ''.join('\n' if c == '\n' else ' ' for c in m.group()), sql)
 
+def join_alias_issues(select):
+    """Conservative ON checks. Previous aliases are legal; flag suspicious key use."""
+    result = []
+    def report(code, reason, suggestion, column=None):
+        offset = column.args.get('table').meta.get('start') if column is not None and column.args.get('table') is not None else None
+        result.append((code, reason, suggestion, column, offset))
+    def terms(node):
+        if isinstance(node, exp.Paren):
+            yield from terms(node.this)
+        elif isinstance(node, exp.And):
+            yield from terms(node.this)
+            yield from terms(node.expression)
+        else:
+            yield node
+    origin = select.args.get('from_')
+    previous = {origin.this.alias_or_name.lower()} if origin and origin.this.alias_or_name else set()
+    local = {j.this.alias_or_name.lower() for j in select.args.get('joins', []) if j.this.alias_or_name} | previous
+    for join in select.args.get('joins', []):
+        name = join.this.alias_or_name
+        current = name.lower()
+        on = join.args.get('on')
+        if not name or on is None:
+            if name: previous.add(current)
+            continue
+        equalities = [t for t in terms(on) if isinstance(t, exp.EQ) and isinstance(t.this, exp.Column) and isinstance(t.expression, exp.Column)]
+        available = previous | {current}
+        # Future joins cannot be referenced by this ON, even if globally declared.
+        for col in on.find_all(exp.Column):
+            if col.find_ancestor(exp.Select) is not select: continue
+            if col.table and col.table.lower() in local and col.table.lower() not in available:
+                report('JOIN_ALIAS_OUT_OF_SCOPE', f'连接 {name} 的 on 条件引用了尚未加入的别名 {col.table}。', '按连接顺序核对别名；将条件放到相关表加入之后，不自动改变业务逻辑。', col)
+        direct_columns = [c for eq in equalities for c in (eq.this, eq.expression)]
+        has_unqualified = any(not c.table for c in direct_columns)
+        # Skip complex subquery predicates: correlation needs separate scope analysis.
+        has_subquery = on.find(exp.Select) is not None
+        uses_current = any(c.table.lower() == current for c in on.find_all(exp.Column) if c.find_ancestor(exp.Select) is select)
+        if equalities and not uses_current and not has_unqualified and not has_subquery:
+            col = next((c for c in direct_columns if c.table.lower() in previous), direct_columns[0])
+            report('JOIN_TARGET_NOT_REFERENCED', f'正在连接 {name}，但 on 条件未引用当前连接表 {name} 的字段；可能误用了其他表别名。', f'核对每个关联项是否应引用 {name}；如为有意只筛选左表，请人工确认连接基数。', col)
+        anchors = set()
+        for eq in equalities:
+            a, b = eq.this, eq.expression
+            if a.table.lower() == current and b.table.lower() in previous: anchors.add(b.table.lower())
+            if b.table.lower() == current and a.table.lower() in previous: anchors.add(a.table.lower())
+        for eq in equalities:
+            a, b = eq.this, eq.expression
+            if not a.table or not b.table or a.name.lower() != b.name.lower(): continue
+            if a.table.lower() == b.table.lower() or not {a.table.lower(), b.table.lower()} <= previous: continue
+            candidates = [c for c, other in ((a, b), (b, a)) if other.table.lower() in anchors and c.table.lower() not in anchors]
+            if len(candidates) != 1: continue
+            wrong = candidates[0]
+            corrected = eq.copy()
+            replacement = corrected.this if wrong is a else corrected.expression
+            alias_node = join.this.args.get('alias')
+            identifier = alias_node.this if alias_node else getattr(join.this, 'this', None)
+            replacement.set('table', identifier.copy() if isinstance(identifier, exp.Identifier) else exp.to_identifier(name))
+            report('JOIN_KEY_ALIAS_MISMATCH', f'正在连接 {name}；该关联项 {eq.sql(dialect="spark")} 只比较已连接的表，未引用 {name}，疑似复制了别名 {wrong.table}。', f'请优先核对是否应改为 {corrected.sql(dialect="spark")}。其他已连接表可以合法用于 on，此处是同名连接键的高优先级风险，不是确定性语法错误；不会自动替换。', wrong)
+        previous.add(current)
+    return result
+
 def analyze(sql):
     issues = []
-    def add(code, level, category, reason, suggestion, node=None, offset=None):
+    def add(code, level, category, reason, suggestion, node=None, offset=None, priority=None):
         meta = (node.meta if node else {})
         if node and not meta:
             meta = next((x.meta for x in node.walk() if x.meta.get('line')), {})
@@ -25,7 +85,7 @@ def analyze(sql):
         if offset is not None:
             line = sql.count('\n', 0, offset) + 1
             column = offset - sql.rfind('\n', 0, offset)
-        issues.append(dict(code=code, severity=level, category=category, line=line, column=column, reason=reason, suggestion=suggestion))
+        issues.append(dict(code=code, severity=level, category=category, line=line, column=column, reason=reason, suggestion=suggestion, **({'priority': priority} if priority is not None else {})))
     clean = mask(sql)
     for m in re.finditer('[，；：（）]', clean):
         add('FULLWIDTH', 'error', '确定性语法错误', 'SQL 代码中存在中文全角标点。', '替换为对应英文半角标点；字符串中的中文标点无需修改。', offset=m.start())
@@ -66,6 +126,8 @@ def analyze(sql):
             for col in scope.columns:
                 if col.table and col.table not in aliases:
                     add('UNDEFINED_ALIAS', 'error', '静态结构错误', f'表别名 {col.table} 未在当前或外层作用域定义（也可能是结构体字段访问）。', '核对别名拼写和作用域；结构体字段需结合表结构验证。', col)
+            for code, reason, suggestion, col, offset in join_alias_issues(select):
+                add(code, 'error', '高优先级关联风险' if code != 'JOIN_ALIAS_OUT_OF_SCOPE' else '静态结构错误', reason, suggestion, col, offset, priority=0)
             for join in select.args.get('joins', []):
                 on = join.args.get('on')
                 if on:
@@ -99,7 +161,9 @@ def analyze(sql):
             issues.append(dict(code='FLUFF_' + code, severity='warning' if code in ('PRS', 'LXR') else 'info', category='方言兼容提示' if code in ('PRS', 'LXR') else '格式建议', line=v.line_no, column=v.line_pos, reason=v.desc(), suggestion='核对 Spark/DLI 语法。' if code in ('PRS', 'LXR') else '点击格式化查看小写关键字、前置逗号和缩进建议。'))
     except Exception:
         add('LINT_FAILED', 'warning', '工具限制', 'SQLFluff 未完成检查。', '缩小 SQL 范围后重试。')
-    issues.sort(key=lambda x: (x['line'], x['column'], x['code']))
+    for issue in issues:
+        issue.setdefault('priority', {'error': 1, 'warning': 2, 'info': 3}[issue['severity']])
+    issues.sort(key=lambda x: (x['priority'], x['line'], x['column'], x['code']))
     return {'issues': issues, 'statement_count': len(trees), 'limitations': '不执行 SQL。表/字段存在性、字段类型、权限、函数签名、分区、连接基数及执行计划必须在数据库验证。解析成功不代表 DLI 可执行。'}
 
 def format_sql(sql):

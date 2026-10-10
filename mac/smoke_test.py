@@ -31,7 +31,10 @@ def main():
         assert any(i['code'] == 'GROUP_TRAILING_COMMA' for i in post('check', 'select a from t group by a,')['issues'])
         result = post('format', "SELECT\n    a,\n    b\nFROM t WHERE dt='${dt}'")['sql']
         assert 'select' in result and '${dt}' in result and '\n    ,' in result
-        print('Frozen backend smoke checks passed: startup, assets, lint, rules, format, templates.')
+        joined = post('check', 'select * from t a1 join u a5 on a5.id=a1.id join v a6 on a6.area=a1.area and a5.region=a1.region')['issues']
+        assert joined[0]['code'] == 'JOIN_KEY_ALIAS_MISMATCH' and joined[0]['priority'] == 0
+        assert 'a6.region = a1.region' in joined[0]['suggestion']
+        print('Frozen backend smoke checks passed: startup, engines, formatting, templates and priority-0 join alias checks.')
     finally:
         p.terminate()
         p.wait(timeout=10)
