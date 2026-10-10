@@ -8,11 +8,11 @@
 
 ## 下载与使用
 
-[下载 Mac 应用 v1.0.4（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.4/SQL-Checker-macOS-AppleSilicon-v1.0.4.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
+[下载 Mac 应用 v1.0.5（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.5/SQL-Checker-macOS-AppleSilicon-v1.0.5.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
 
 解压后将「SQL 检查器.app」拖入「应用程序」，双击使用。无需安装 Python、无需终端、不需要联网。升级时先退出旧版再替换。
 
-应用使用临时本地签名，尚未完成 Apple Developer ID 签名/公证；macOS 首次打开时可能要求确认。仅 Apple Silicon 版本在开发机器完成验证，Intel Mac、其他电脑和较旧 macOS 未验证。
+应用使用临时本地签名，尚未完成 Apple Developer ID 签名/公证；macOS 首次打开时可能要求确认。要求 macOS 14 或更新版本，支持 Apple Silicon 架构（包括 M1 / M2 / M3 / M4）。仅开发机器完成实机验证；Intel 和其他机器未验证。
 
 ![应用界面（合成示例）](mac/startup-preview.png)
 
@@ -71,7 +71,7 @@ python3 -m venv .venv
 node mac/test_bridge.cjs
 ```
 
-本机 40 项 Python 测试通过，覆盖检测规则、作用域、行号、模板、格式化、API 验证及轻量启动。原生通信成功/错误/超时/网页版回退、冻结进程和实际 Mac 窗口操作已验证。全部使用合成 SQL，没有读取业务数据。
+本机 45 项 Python 测试通过，覆盖检测规则、作用域、行号、模板、格式化、API 验证及轻量启动。原生通信成功/错误/超时/网页版回退、冻结进程和实际 Mac 窗口操作已验证。全部使用合成 SQL，没有读取业务数据。
 
 [Mac 构建与打包说明](mac/README.md)。仓库附有自动测试工作流。CI 的结果以 GitHub Actions 实际运行结果为准。
 
