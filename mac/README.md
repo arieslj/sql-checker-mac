@@ -13,7 +13,7 @@ python3 -m venv .venv
 bash mac/build.command
 ```
 
-产物：`mac/dist/SQL 检查器.app` 与 `mac/SQL-Checker-macOS-AppleSilicon-v1.0.6.zip`。
+产物：`mac/dist/SQL 检查器.app` 与 `mac/SQL-Checker-macOS-AppleSilicon-v1.0.7.zip`。
 
 PyInstaller 包含 Python 运行时与依赖；Swift AppKit / WebKit 提供原生窗口。构建脚本生成多尺寸 ICNS 图标，完成临时本地签名。没有 Developer ID 签名或 Apple 公证，不适用于 App Store 分发。
 

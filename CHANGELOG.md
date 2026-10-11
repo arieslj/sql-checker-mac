@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.0.7
+
+- 修复 rollup/cube/grouping sets 整体跳过，导致漏分组字段未报错的问题。
+- 按多维分组维度全集核对，保留合法汇总 NULL 与空集合。
+- 支持 WITH 写法、tuple、嵌套和混合多维分组。
+- 补查 grouping/grouping_id 参数、having/order by 未分组字段及 where 直接聚合。
+- 增加 DLI 官方文档依据、覆盖矩阵和回归用例。
+
 ## v1.0.6
 
 - 聚合与 group by 一致性问题提升为最高优先级，显示优先处理。

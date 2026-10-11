@@ -16,5 +16,5 @@ cp mac/Info.plist "$app_path/Contents/Info.plist"
 cp -R third_party_licenses "$app_path/Contents/Resources/ThirdPartyLicenses"
 .venv/bin/python mac/check_compatibility.py "$app_path"
 /usr/bin/codesign --force --deep --sign - "$app_path"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" mac/SQL-Checker-macOS-AppleSilicon-v1.0.6.zip
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" mac/SQL-Checker-macOS-AppleSilicon-v1.0.7.zip
 echo "打包完成：$app_path"

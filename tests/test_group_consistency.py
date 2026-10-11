@@ -59,10 +59,9 @@ def test_window_reference_on_ungrouped_field_is_detected():
 def test_nested_window_aggregate_requires_grouping_for_other_output():
     assert any(i['code']=='GROUP_BY_MISSING' for i in errors('select a,sum(sum(b)) over() from t'))
 
-def test_complex_grouping_is_explicitly_unverified():
-    items=grouping('select a,sum(b) from t group by rollup(a)')
+def test_rollup_uses_real_dimensions_instead_of_skipping_validation():
     assert not errors('select a,sum(b) from t group by rollup(a)')
-    assert any(i['code']=='GROUP_COMPLEX_UNVERIFIED' for i in items)
+    assert errors('select a,c,sum(b) from t group by rollup(a)')
 
 def test_wildcard_needs_database_expansion():
     items=grouping('select *,count(*) from t group by a')

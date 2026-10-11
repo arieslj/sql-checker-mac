@@ -38,7 +38,11 @@ def main():
         assert grouped[0]['code'] == 'GROUP_NON_AGGREGATE' and grouped[0]['priority'] == 0 and grouped[0]['severity'] == 'error'
         missing = post('check', 'select area,sum(amount) from synthetic_items')['issues']
         assert missing[0]['code'] == 'GROUP_BY_MISSING' and missing[0]['priority'] == 0
-        print('Frozen backend checks passed: engines, formatting, templates, priority-0 joins and aggregate/group consistency.')
+        subtotal = post('check', 'select vehicle,reason,count(*) from synthetic_items group by rollup(vehicle)')['issues']
+        assert subtotal[0]['code'] == 'GROUP_NON_AGGREGATE' and 'reason' in subtotal[0]['reason'] and subtotal[0]['priority'] == 0
+        legitimate = post('check', 'select vehicle,reason,count(*) from synthetic_items group by grouping sets((vehicle),(reason),())')['issues']
+        assert not any(i['severity']=='error' and i['code'].startswith('GROUP') for i in legitimate)
+        print('Frozen backend checks passed: priority-0 aliases, ordinary and multi-dimensional groups, templates and formatting.')
     finally:
         p.terminate()
         p.wait(timeout=10)

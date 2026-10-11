@@ -8,7 +8,7 @@
 
 ## 下载与使用
 
-[下载 Mac 应用 v1.0.6（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.6/SQL-Checker-macOS-AppleSilicon-v1.0.6.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
+[下载 Mac 应用 v1.0.7（Apple Silicon / M 系列）](https://github.com/arieslj/sql-checker-mac/releases/download/v1.0.7/SQL-Checker-macOS-AppleSilicon-v1.0.7.zip) · [全部 Release](https://github.com/arieslj/sql-checker-mac/releases)
 
 解压后将「SQL 检查器.app」拖入「应用程序」，双击使用。无需安装 Python、无需终端、不需要联网。升级时先退出旧版再替换。
 macOS 首次打开时可能要求确认。要求 macOS 14 或更新版本，支持 Apple Silicon 架构（包括 M1 / M2 / M3 / M4）。仅开发机器完成实机验证；Intel 和其他机器未验证。
@@ -34,7 +34,7 @@ macOS 首次打开时可能要求确认。要求 macOS 14 或更新版本，支�
 
 **静态检查不能完全代替 DLI。** 表和字段存在性、类型、权限、函数签名、分区、连接基数和执行计划必须在数据库验证。解析成功不表示 SQL 能在 DLI 执行。
 
-join 提示不表示已确认行数放大。除零检测只明确识别 `nullif` 防护，`case when` 等防护可能仍收到提示。支持简单表达式、输出别名和序号分组；rollup/cube/grouping sets/all、星号和歧义别名会明确提示需要验证。日期提示不能推断真实字段类型；完整 Jinja / 动态 SQL 不支持。
+join 提示不表示已确认行数放大。除零检测只明确识别 `nullif` 防护，`case when` 等防护可能仍收到提示。支持简单表达式、输出别名和序号分组；rollup/cube/grouping sets（含嵌套、混合及 WITH 写法）参与一致性核对；all、星号和歧义别名仍会提示需要验证。日期提示不能推断真实字段类型；完整 Jinja / 动态 SQL 不支持。
 
 格式化通过词法 token、字面量、引用标识符和注释比较，拒绝结构变化或无法解析的输入。格式化后需要重新检查。单次 SQL 上限为 50,000 字符。
 
@@ -50,9 +50,19 @@ join 提示不表示已确认行数放大。除零检测只明确识别 `nullif`
 - 直接按聚合/窗口表达式分组或错误序号：优先提示。
 - group by 中有未在非聚合输出体现的维度：以高优先级**粒度风险**提醒。这可以是合法 SQL，不自动删除维度。
 
-支持完整表达式、按原始字段派生表达式、输出别名、序号、单来源限定/未限定字段、混合聚合、窗口与独立子查询作用域。别名与序号按常见 Spark 设置解析，需核对 DLI 配置与真实同名字段；按聚合输出别名分组存在歧义时标为验证风险。rollup/cube/grouping sets/all、星号和复杂相关子查询不保证完整覆盖。建议需要人工确认，不自动修改统计粒度。
+支持完整表达式、按原始字段派生表达式、输出别名、序号、单来源限定/未限定字段、混合聚合、窗口与独立子查询作用域。别名与序号按常见 Spark 设置解析，需核对 DLI 配置与真实同名字段；按聚合输出别名分组存在歧义时标为验证风险。支持 rollup/cube/grouping sets 的维度覆盖及空集合；all、星号和复杂相关子查询不保证完整覆盖。建议需要人工确认，不自动修改统计粒度。
 
 [参考 Spark GROUP BY 文档](https://spark.apache.org/docs/3.5.7/sql-ref-syntax-qry-select-groupby.html)。模板变量采用等长且区分身份的临时标记，避免同长度变量被当成相同表达式；修改建议恢复原始模板。
+
+## DLI 多维分组核对
+
+v1.0.7 移除以前对 rollup/cube/grouping sets 的整体跳过：先收集完整分组维度，再核对非聚合输出。汇总集合里未出现的已声明维度可以成为 NULL，不要求每个集合逐字包含所有输出列。
+
+例如输出车型表达式、驳回原因和 count，但 rollup 只有车型表达式时，会最高优先级指出驳回原因缺少分组。根据业务要求可以把原因加入 rollup，或作为 rollup 外的固定维度，两种写法的汇总层级不同，不自动替换。
+
+同时核对 grouping/grouping_id 的上下文和参数、having/order by 的未分组字段、where 直接聚合及前置 GROUP BY 维度未进入任何显式 grouping sets 集合的 NULL 风险。支持 tuple、嵌套和混合多维分组，字段覆盖不枚举指数数量的 cube 集合。
+
+[文档依据、覆盖矩阵与验证边界](docs/dli-grouping-coverage.md)。
 
 ## on 条件的别名核对
 
@@ -81,7 +91,7 @@ python3 -m venv .venv
 node mac/test_bridge.cjs
 ```
 
-本机 87 项 Python 测试通过，覆盖检测规则、作用域、行号、模板、格式化、API 验证及轻量启动。原生通信成功/错误/超时/网页版回退、冻结进程和实际 Mac 窗口操作已验证。全部使用合成 SQL，没有读取业务数据。
+本机 133 项 Python 测试通过，覆盖检测规则、作用域、行号、模板、格式化、API 验证及轻量启动。原生通信成功/错误/超时/网页版回退、冻结进程和实际 Mac 窗口操作已验证。全部使用合成 SQL，没有读取业务数据。
 
 [Mac 构建与打包说明](mac/README.md)。仓库附有自动测试工作流。CI 的结果以 GitHub Actions 实际运行结果为准。
 

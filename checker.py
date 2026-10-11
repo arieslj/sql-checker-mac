@@ -127,10 +127,31 @@ def group_consistency_issues(select, template_reverse=None):
     has_aggregate = any(global_aggregate(item) for item in select.expressions)
     for clause in ('having', 'order'):
         if select.args.get(clause) and global_aggregate(select.args[clause]): has_aggregate = True
+    where = select.args.get('where')
+    if where is not None:
+        for node in local_nodes(where):
+            if isinstance(node, exp.AggFunc):
+                emit('WHERE_AGGREGATE', 'error', f'where 中直接使用了聚合表达式 {display(node)}。', '行级条件放在 where，聚合后的过滤按业务含义使用 having 或外层查询。', node)
     if group is None and not has_aggregate: return result
-    if group is not None and (group.find(exp.Rollup, exp.Cube, exp.GroupingSets) or group.args.get('all')):
-        emit('GROUP_COMPLEX_UNVERIFIED', 'warning', '复杂分组（rollup/cube/grouping sets/all）需核对 DLI 方言和输出字段，本次未作简单字段一致性判定。', '检查各分组集合及输出维度，在 DLI 验证执行结果。', group, 2)
+    if group is not None and group.args.get('all'):
+        emit('GROUP_COMPLEX_UNVERIFIED', 'warning', 'group by all 的支持取决于 DLI 引擎版本，本次不作普通分组判定。', '核对 DLI 引擎版本，建议使用明确的分组项。', group, 2)
         return result
+    advanced = group is not None and group.find(exp.Rollup, exp.Cube, exp.GroupingSets) is not None
+    def dimensions(node):
+        # Only flatten grouping containers, never scalar expressions or functions.
+        if isinstance(node, (exp.Rollup, exp.Cube, exp.GroupingSets, exp.Tuple)):
+            for child in node.expressions: yield from dimensions(child)
+        elif isinstance(node, exp.Paren):
+            yield from dimensions(node.this)
+        else:
+            yield node
+    group_items = []
+    if group is not None:
+        for item in group.expressions: group_items.extend(dimensions(item))
+        for kind in ('rollup', 'cube', 'grouping_sets'):
+            for item in group.args.get(kind) or []: group_items.extend(dimensions(item))
+    # Columns absent from individual grouping sets may legally become NULL.
+    # Consistency is checked against the union, not each subtotal separately.
     source = select.args.get('from_')
     names = [source.this.alias_or_name.lower()] if source and source.this.alias_or_name else []
     names += [j.this.alias_or_name.lower() for j in select.args.get('joins', []) if j.this.alias_or_name]
@@ -147,8 +168,9 @@ def group_consistency_issues(select, template_reverse=None):
     for item in select.expressions:
         if isinstance(item, exp.Alias): aliases.setdefault(item.alias.lower(), []).append(item.this)
     keys = {}
+    dimension_resolution = {}
     uncertain = False
-    for item in group.expressions if group is not None else []:
+    for item in group_items:
         value = item
         resolved_alias = False
         if isinstance(item, exp.Column) and not item.table and item.name.lower() in aliases:
@@ -182,17 +204,48 @@ def group_consistency_issues(select, template_reverse=None):
             emit('GROUP_AGGREGATE_KEY', 'warning' if resolved_alias else 'error', f'group by 项 {display(item)} 按输出别名解析为聚合或窗口表达式。' if resolved_alias else f'group by 项 {display(item)} 包含聚合或窗口表达式。', '分组应使用输入维度，核对输出别名、序号与表结构；聚合表达式留在输出或 having 中。', item)
             uncertain = True
             continue
+        dimension_resolution[key(item)] = key(value)
         keys[key(value)] = (item, value)
     if uncertain: return result
+    if group is not None and group.args.get('grouping_sets'):
+        active = set()
+        for container in group.args['grouping_sets']:
+            active.update(dimension_resolution.get(key(item), key(item)) for item in dimensions(container))
+        for container in group.expressions:
+            for item in dimensions(container):
+                resolved = dimension_resolution.get(key(item), key(item))
+                if resolved not in active and any(isinstance(n, exp.Column) for n in local_nodes(item)):
+                    emit('GROUP_KEY_ALWAYS_NULL', 'warning', f'前置 group by 维度 {display(item)} 未出现在 grouping sets 的任意集合中。', '兼容分组语义下该维度可能在所有结果行中为 NULL；核对 DLI 引擎与集合配置是否符合业务需求。', item)
     used = set()
     unknown_star = False
-    for item in select.expressions:
-        value = item.this if isinstance(item, exp.Alias) else item
+    outputs = [(item.this if isinstance(item, exp.Alias) else item, 'select') for item in select.expressions]
+    for name in ('having', 'order'):
+        if select.args.get(name) is not None: outputs.append((select.args[name], name))
+    for value, clause in outputs:
         missing = []
         ambiguous = []
+        resolving_aliases = set()
         def validate(node, window_function=False):
             nonlocal unknown_star
             if isinstance(node, (exp.Select, exp.Subquery)): return
+            if isinstance(node, (exp.Grouping, exp.GroupingId)):
+                arguments = node.expressions
+                def argument_key(argument):
+                    if isinstance(argument, exp.Column) and not argument.table:
+                        candidates = aliases.get(argument.name.lower(), [])
+                        if len(candidates) == 1 and key(candidates[0]) in keys: return key(candidates[0])
+                    return key(argument)
+                argument_keys = [argument_key(a) for a in arguments]
+                used.update(k for k in argument_keys if k in keys)
+                if not advanced:
+                    emit('GROUPING_CONTEXT_INVALID', 'error', f'{display(node)} 只能用于多维分组上下文。', '配合 rollup/cube/grouping sets 使用，并核对 DLI 版本。', node)
+                elif any(k not in keys for k in argument_keys):
+                    emit('GROUPING_ARGUMENT_INVALID', 'error', f'{display(node)} 引用了未声明的分组维度。', '参数必须与实际分组表达式对应；按表达式分组时不能仅使用其内部原始字段。', node)
+                elif isinstance(node, exp.GroupingId) and arguments and argument_keys != list(keys):
+                    emit('GROUPING_ID_ARGUMENTS', 'warning', f'{display(node)} 的参数顺序/完整性与分组维度不一致。', '常见 Spark 语义要求参数与分组维度同序且完整；也可使用无参数 grouping_id()，请在 DLI 核对。', node)
+                elif isinstance(node, exp.Grouping) and len(arguments) != 1:
+                    emit('GROUPING_ARGUMENT_INVALID', 'error', 'grouping() 应指定一个分组表达式。', '为每个维度分别调用 grouping(分组表达式)。', node)
+                return
             canonical = key(node)
             if canonical in keys:
                 used.add(canonical)
@@ -229,15 +282,26 @@ def group_consistency_issues(select, template_reverse=None):
                 return
             if isinstance(node, exp.AggFunc) and not window_function: return
             if isinstance(node, exp.Column):
+                if clause != 'select' and not node.table and node.name.lower() in aliases:
+                    alias_name = node.name.lower()
+                    if len(aliases[alias_name]) == 1 and alias_name not in resolving_aliases:
+                        resolving_aliases.add(alias_name)
+                        validate(aliases[alias_name][0])
+                        resolving_aliases.remove(alias_name)
+                        return
                 missing.append(node)
                 return
             for child in node.iter_expressions(): validate(child)
+        previous_used = set(used)
         validate(value)
+        if clause != 'select': used = previous_used
         if ambiguous:
             emit('GROUP_COLUMN_AMBIGUOUS', 'warning', f'输出 {display(value)} 与 group by 存在同名但限定方式不同的字段；多表来源下无法离线确认是否相同。', '结合表结构核对裸字段实际来源，建议在 select 和 group by 明确使用相同表别名。', ambiguous[0])
         if missing:
             fields = ', '.join(dict.fromkeys(display(c) for c in missing))
-            if group is None:
+            if clause != 'select':
+                emit('GROUP_CLAUSE_NON_AGGREGATE', 'error', f'{clause} 包含未被分组覆盖的非聚合字段：{fields}。', '使用分组维度、合法输出别名或聚合表达式核对该条件/排序项。', missing[0])
+            elif group is None:
                 emit('GROUP_BY_MISSING', 'error', f'当前查询混用聚合与非聚合输出 {fields}，但没有 group by。', '按业务统计维度添加 group by，或将对应输出改为符合业务含义的聚合表达式。', missing[0])
             else:
                 emit('GROUP_NON_AGGREGATE', 'error', f'select 输出 {display(value)} 包含未被 group by 覆盖的非聚合字段：{fields}。', '核对 select 与 group by 的字段和完整表达式；将其纳入正确分组维度或按业务含义聚合，确认统计粒度。', missing[0])

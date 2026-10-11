@@ -1,13 +1,14 @@
-# SQL 检查器 v1.0.6 — 优先核对聚合与 group by
+# SQL 检查器 v1.0.7 — 补全 DLI 多维分组一致性
 
-- select 中非聚合字段漏入 group by：优先报错并定位字段。
-- 聚合/非聚合混用却缺少 group by，或上下表达式不一致：优先报错。
-- 直接聚合/窗口分组项和错误序号：优先提示。
-- 分组维度未在非聚合输出体现：优先标为粒度风险，可以是合法 SQL，需人工确认。
-- 正常别名、序号、派生表达式、窗口及子查询作用域分开处理；同长度模板变量不再混淆。
+修复上一版遇到 rollup/cube/grouping sets 整体跳过检查的缺陷。
 
-保留 on 关联项优先提示、小写关键字、前置逗号格式化、复制清单和离线隐私边界。所有建议都不自动修改业务逻辑。
+- 车型表达式 + 原因 + count，但 rollup 只有车型表达式：最高优先级指出原因漏分组。
+- 同时支持函数式与 WITH ROLLUP/CUBE、GROUPING SETS 前缀写法、空集合、tuple、嵌套及混合维度。
+- 按已声明维度的全集核对，不把合法汇总行中的 NULL 当成未分组错误，也不指数展开 cube。
+- 核对 grouping()/grouping_id() 上下文与参数、having/order by 未分组字段、where 直接聚合和显式集合遗漏前置维度的 NULL 风险。
 
-下载 `SQL-Checker-macOS-AppleSilicon-v1.0.6.zip`，退出旧应用后替换。Apple Silicon / macOS 14+，保留 M 系列兼容性修复。应用尚未进行 Apple Developer ID 签名/公证，未在所有 M 系列和系统版本实机验证。
+官方文档依据及覆盖边界见仓库 docs/dli-grouping-coverage.md。不会自动增删分组项或修改统计粒度。字段、类型、DLI 引擎版本和配置仍须真实环境验证，不承诺全面替代 DLI。
 
-87 项 Python 测试、原生通信、打包引擎与兼容性审计通过；测试只使用合成 SQL。DLI 配置、字段类型、歧义别名、复杂分组仍需数据库验证。
+133 项 Python 回归测试、原生通信、打包引擎和兼容性审计通过。用例为合成 SQL，不公开业务 SQL 或真实数据。
+
+下载 SQL-Checker-macOS-AppleSilicon-v1.0.7.zip，退出旧版后替换。Apple Silicon / macOS 14+；未进行 Apple Developer ID 签名/公证。附源码 ZIP 和 SHA-256 校验文件。
